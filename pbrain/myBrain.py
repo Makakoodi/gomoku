@@ -3,9 +3,10 @@ import pisqpipe as pp
 from pisqpipe import DEBUG_EVAL, DEBUG
 
 MAX_BOARD = 100
-board = [[0 for i in range(MAX_BOARD)] for j in range(MAX_BOARD)]
+board = [[0 for _ in range(MAX_BOARD)] for _ in range(MAX_BOARD)]
 
 def brain_init():
+    pp.pipeOut("DEBUG brain_init start")
     if pp.width < 5 or pp.height < 5:
         pp.pipeOut("ERROR size of the board")
         return
@@ -13,30 +14,59 @@ def brain_init():
         pp.pipeOut("ERROR Maximal board size is {}".format(MAX_BOARD))
         return
     init_candidate_moves()
+    reset_bounds()
     pp.pipeOut("OK")
+    pp.pipeOut("DEBUG brain_init OK")
 
 def brain_restart():
     for x in range(pp.width):
         for y in range(pp.height):
             board[x][y] = 0
+    move_stack.clear()
     init_candidate_moves()
+    reset_bounds()
     pp.pipeOut("OK")
 
 def isFree(x, y):
-    return x >= 0 and y >= 0 and x < pp.width and y < pp.height and board[x][y] == 0
-
-
+    return 0 <= x < pp.width and 0 <= y < pp.height and board[x][y] == 0
 
 EMPTY, ME, OPP = 0, 1, 2
 RADIUS = 2
-candidate_moves = set()
-last_played = None
+INF = 1_000_000_000
 
-# return true if x y is inside the board
+candidate_moves = []  # list
+is_candidate = []
+for i in range(MAX_BOARD):
+    row = []
+    for j in range(MAX_BOARD):
+        row.append(False)
+    is_candidate.append(row)
+
+last_played = None
+move_stack = []  
+
+min_x = min_y = INF
+max_x = max_y = -INF
+
+def update_bounds(x, y):
+    global min_x, min_y, max_x, max_y
+    if x < min_x: min_x = x
+    if x > max_x: max_x = x
+    if y < min_y: min_y = y
+    if y > max_y: max_y = y
+
+def reset_bounds():
+    global min_x, min_y, max_x, max_y
+    min_x = min_y = INF
+    max_x = max_y = -INF
+    for x in range(pp.width):
+        for y in range(pp.height):
+            if board[x][y] != EMPTY:
+                update_bounds(x, y)
+
 def inside(x, y):
     return 0 <= x < pp.width and 0 <= y < pp.height
 
-# get the cells around x y within r radius
 def neighbors(x, y, r=RADIUS):
     out = []
     for dx in range(-r, r+1):
@@ -48,9 +78,24 @@ def neighbors(x, y, r=RADIUS):
                 out.append((xx, yy))
     return out
 
-# init candidate moves set
+def add_candidate(x, y):
+    if isFree(x, y) and not is_candidate[x][y]:
+        is_candidate[x][y] = True
+        candidate_moves.append((x, y))
+
+def remove_candidate(x, y):
+    if is_candidate[x][y]:
+        is_candidate[x][y] = False
+        for i, (cx, cy) in enumerate(candidate_moves):
+            if cx == x and cy == y:
+                candidate_moves.pop(i)
+                break
+
 def init_candidate_moves():
-    candidate_moves.clear()
+    candidate_moves.clear()    
+    for x in range(pp.width):
+        for y in range(pp.height):
+            is_candidate[x][y] = False
     any_stone = False
     for xx in range(pp.width):
         for yy in range(pp.height):
@@ -60,23 +105,27 @@ def init_candidate_moves():
         if any_stone:
             break
     if not any_stone:
-        mid = (pp.width // 2, pp.height // 2)
-        candidate_moves.add(mid)
+        mx, my = (pp.width // 2, pp.height // 2)
+        add_candidate(mx, my)
     else:
         for xx in range(pp.width):
             for yy in range(pp.height):
                 if board[xx][yy] != EMPTY:
-                    update_candidates_after_place(xx, yy)
-    to_drop = {(cx, cy) for (cx, cy) in candidate_moves if board[cx][cy] != EMPTY}
-    candidate_moves.difference_update(to_drop)
+                    for (nx, ny) in neighbors(xx, yy):
+                        add_candidate(nx, ny)
+        
+        to_drop = []
+        for (cx, cy) in candidate_moves:
+            if board[cx][cy] != EMPTY:
+                to_drop.append((cx, cy))
+        for (cx, cy) in to_drop:
+            remove_candidate(cx, cy)
 
 def update_candidates_after_place(x, y):
-    candidate_moves.discard((x, y))
+    remove_candidate(x, y)
     for (xx, yy) in neighbors(x, y):
-        if isFree(xx, yy):
-            candidate_moves.add((xx, yy))
+        add_candidate(xx, yy)
 
-# for piskvork manager if we use the takeback command
 def update_candidates_after_takeback(x, y):
     near_stone = False
     for (xx, yy) in neighbors(x, y):
@@ -84,9 +133,8 @@ def update_candidates_after_takeback(x, y):
             near_stone = True
             break
     if near_stone and isFree(x, y):
-        candidate_moves.add((x, y))
+        add_candidate(x, y)
 
-# check if we have five in a row vertically, diagonally and horizontally
 def check_five(x, y, who):
     for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
         c = 1
@@ -100,96 +148,140 @@ def check_five(x, y, who):
             return True
     return False
 
-# check distance from a to b
 def manhattan(a, b):
     ax, ay = a; bx, by = b
     return abs(ax - bx) + abs(ay - by)
 
-# we prio the neighbors of the last move before moving onto other possibilities
 def order_candidates(cands, last_move):
-    cands_list = list(cands)
+    if not cands:
+        return []
     if last_move is None:
         center = (pp.width//2, pp.height//2)
-        cands_list.sort(key=lambda mv: manhattan(mv, center))
-        return cands_list
+        near, far = [], []
+        for mv in cands:
+            if manhattan(mv, center) <= 2:
+                near.append(mv)
+            else:
+                far.append(mv)
+        near.sort(key=lambda mv: manhattan(mv, center))
+        return near + far
+
     lx, ly = last_move
-    near = set(neighbors(lx, ly, r=1))
-    first = [m for m in cands_list if m in near]
-    rest  = [m for m in cands_list if m not in near]
-    return first + rest
+    nset = set(neighbors(lx, ly, r=1))
+    near, rest = [], []
+    for mv in cands:
+        if mv in nset:
+            near.append(mv)
+        else:
+            rest.append(mv)
+    return near + rest
 
-
-# return the total length of the line through (x,y) for player 'who' in one direction
-def line_len_from(x, y, dx, dy, who):
-    count = 1
-    # forward
-    nx, ny = x + dx, y + dy
-    while inside(nx, ny) and board[nx][ny] == who:
-        count += 1
-        nx += dx; ny += dy
-    # backward
-    nx, ny = x - dx, y - dy
-    while inside(nx, ny) and board[nx][ny] == who:
-        count += 1
-        nx -= dx; ny -= dy
-    return count
-
-# heuristic that only looks at the 4 lines crossing 'last_move' (LOCAL evaluation)
-def evaluate_local(last_move):
-    if last_move is None:
+def evaluate_area():
+    if max_x < min_x or max_y < min_y:
         return 0
-    lx, ly = last_move
-    me_best = 0
-    opp_best = 0
-    for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
-        me_best  = max(me_best,  line_len_from(lx, ly, dx, dy, ME))
-        opp_best = max(opp_best, line_len_from(lx, ly, dx, dy, OPP))
     weights = {0:0, 1:1, 2:10, 3:100, 4:1000, 5:100000}
-    return weights.get(me_best, 100000) - weights.get(opp_best, 100000)
+    my_best = 0
+    opp_best = 0
+    sx = max(0, min_x - 2); ex = min(pp.width - 1, max_x + 2)
+    sy = max(0, min_y - 2); ey = min(pp.height - 1, max_y + 2)
+    for x in range(sx, ex+1):
+        for y in range(sy, ey+1):           
+            if board[x][y] not in (ME, OPP):
+                continue
+            who = board[x][y]
+            for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
+                bx, by = x - dx, y - dy
+                if inside(bx, by) and board[bx][by] == who:
+                    continue
+                cnt = 0
+                nx, ny = x, y
+                while inside(nx, ny) and board[nx][ny] == who:
+                    cnt += 1
+                    nx += dx; ny += dy
+                if who == ME:
+                    if cnt > my_best: my_best = cnt
+                else:
+                    if cnt > opp_best: opp_best = cnt
+    return weights.get(my_best, 100000) - weights.get(opp_best, 100000)
 
-# todo: alpha beta pruning
-def minimax(depth, maximizing, cands, last_move):    
+def alphabeta(depth, alpha, beta, is_max, candidates, last_move):    
     if depth == 0 or pp.terminateAI:
-        return evaluate_local(last_move), None
-    
-    if not cands:
+        return evaluate_area(), None
+    if not candidates:
         return 0, None
-    ordered = order_candidates(cands, last_move)
-    if maximizing:
-        best_val, best_move = -10**9, None
-        for (x, y) in ordered:
-            board[x][y] = ME
-            if check_five(x, y, ME):
-                board[x][y] = EMPTY
-                return 100000, (x, y)
-            child_cands = set(cands)
-            child_cands.discard((x, y))
-            for (nx, ny) in neighbors(x, y):
-                if isFree(nx, ny):
-                    child_cands.add((nx, ny))
+
+    ordered = order_candidates(candidates, last_move)
+    WIN_SCORE = 100000
+
+    if is_max:
+        best_move = None
+        for (mx, my) in ordered:
             
-            val, _ = minimax(depth-1, False, child_cands, (x, y))
-            board[x][y] = EMPTY
-            if val > best_val:
-                best_val, best_move = val, (x, y)
-        return best_val, best_move
+            board[mx][my] = ME
+            update_bounds(mx, my)
+
+            if check_five(mx, my, ME):
+                board[mx][my] = EMPTY
+                reset_bounds()
+                return WIN_SCORE, (mx, my)
+
+            child_cands = build_child_candidates(candidates, (mx, my))
+            score, _ = alphabeta(depth-1, alpha, beta, False, child_cands, (mx, my))
+
+            
+            board[mx][my] = EMPTY
+            reset_bounds()
+
+            #Max
+            if score > alpha:
+                alpha = score
+                best_move = (mx, my)
+
+            #Pruning
+            if beta <= alpha:
+                break
+            
+
+        return alpha, best_move
+
     else:
-        best_val, best_move = 10**9, None
-        for (x, y) in ordered:
-            board[x][y] = OPP
-            if check_five(x, y, OPP):
-                board[x][y] = EMPTY
-                return -100000, (x, y)
-            child_cands = set(cands)
-            child_cands.discard((x, y))
-            for (nx, ny) in neighbors(x, y):
-                if isFree(nx, ny):
-                    child_cands.add((nx, ny))
-            val, _ = minimax(depth-1, True, child_cands, (x, y))
-            board[x][y] = EMPTY
-            if val < best_val:
-                best_val, best_move = val, (x, y)
-        return best_val, best_move
+        best_move = None
+        for (mx, my) in ordered:
+            
+            board[mx][my] = OPP
+            update_bounds(mx, my)
+           
+            if check_five(mx, my, OPP):
+                board[mx][my] = EMPTY
+                reset_bounds()
+                return -WIN_SCORE, (mx, my)
+
+            child_cands = build_child_candidates(candidates, (mx, my))
+            score, _ = alphabeta(depth-1, alpha, beta, True, child_cands, (mx, my))
+
+            
+            board[mx][my] = EMPTY
+            reset_bounds()
+
+            #Min
+            if score < beta:
+                beta = score
+                best_move = (mx, my)
+
+            #Pruning
+            if beta <= alpha:
+                break      
+
+        return beta, best_move
+def build_child_candidates(cands, played_xy):
+    child = list(cands)
+    if played_xy in child:
+        child.remove(played_xy)
+    px, py = played_xy
+    for (nx, ny) in neighbors(px, py):
+        if isFree(nx, ny) and (nx, ny) not in child:
+            child.append((nx, ny))
+    return child
 
 def immediate_tactic(last_move=None):
     cand = order_candidates(candidate_moves, last_move)
@@ -212,7 +304,9 @@ def choose_move(depth=2, last_move=None):
     if mv is not None:
         return mv
     cand = order_candidates(candidate_moves, last_move)
-    score, mv = minimax(depth, True, set(cand), last_move)
+
+    score, mv = alphabeta(depth, -INF, INF, True, list(cand), last_move)
+    
     if mv is not None:
         return mv
     for x in range(pp.width):
@@ -224,7 +318,9 @@ def choose_move(depth=2, last_move=None):
 def brain_my(x, y):
     if isFree(x,y):
         board[x][y] = ME
+        move_stack.append((x, y, ME))
         update_candidates_after_place(x, y)
+        update_bounds(x, y)
         global last_played
         last_played = (x, y)
     else:
@@ -233,7 +329,9 @@ def brain_my(x, y):
 def brain_opponents(x, y):
     if isFree(x,y):
         board[x][y] = OPP
+        move_stack.append((x, y, OPP))
         update_candidates_after_place(x, y)
+        update_bounds(x, y)
         global last_played
         last_played = (x, y)
     else:
@@ -246,27 +344,32 @@ def brain_block(x, y):
         pp.pipeOut("ERROR winning move [{},{}]".format(x, y))
 
 def brain_takeback(x, y):
-    if x >= 0 and y >= 0 and x < pp.width and y < pp.height and board[x][y] != 0:
+    if 0 <= x < pp.width and 0 <= y < pp.height and board[x][y] != 0:
         board[x][y] = 0
         update_candidates_after_takeback(x, y)
+        if move_stack and move_stack[-1][0] == x and move_stack[-1][1] == y:
+            move_stack.pop()
+        global last_played
+        last_played = (move_stack[-1][0], move_stack[-1][1]) if move_stack else None
+        reset_bounds()
         return 0
     return 2
 
 def brain_turn():
     if pp.terminateAI:
         return
-    x, y = choose_move(depth=2, last_move=last_played)
-    #this loops the whole board backwards if we pick an occupied cell for some reason
-    #(i dont know if this is agains the rules)
-    if not isFree(x, y):
-        found = False
+    #depth 3 now
+    x, y = choose_move(depth=3, last_move=last_played)
+    if not isFree(x, y):        
+        placed = False
         for xx in range(pp.width):
             for yy in range(pp.height):
                 if isFree(xx, yy):
                     x, y = xx, yy
-                    found = True
+                    placed = True
                     break
-            if found: break
+            if placed:
+                break
     pp.do_mymove(x, y)
 
 def brain_end():
