@@ -19,5 +19,3 @@ To test out the bot, you can simply download the Piskvork manager and then downl
  pyinstaller.exe myBrain.py pisqpipe.py --name pbrain-mybrain.exe --onefile
 
 
-## Known Limitations
-Advanced heuristics (e.g., open three, open four detection) are not yet implemented.

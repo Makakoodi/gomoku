@@ -1,5 +1,6 @@
 import random
 import pisqpipe as pp
+import re
 from pisqpipe import DEBUG_EVAL, DEBUG
 
 MAX_BOARD = 100
@@ -204,6 +205,108 @@ def evaluate_area():
                     if cnt > opp_best: opp_best = cnt
     return weights.get(my_best, 100000) - weights.get(opp_best, 100000)
 
+def _line_values(x, y, dx, dy, n=9):
+    vals, coords = [], []
+    for i in range(-n//2, n//2 + 1):
+        xx, yy = x + i*dx, y + i*dy
+        if inside(xx, yy):
+            vals.append(board[xx][yy])
+            coords.append((xx, yy))
+        else:
+            vals.append(3)
+            coords.append((xx, yy))
+    return vals, coords
+
+def _encode(vals, who):
+    return ''.join('1' if v == who else ('0' if v == 0 else ('3' if v == 3 else '2')) for v in vals)
+
+#1 is our stone and 0 is empty cell
+_OPEN4 = re.compile(r'011110')
+_OPEN3 = re.compile(r'01110|010110')
+
+def _collect_by_pattern(who):
+    open4, open3 = set(), set()
+    for x, y in candidate_moves:
+        if pp.terminateAI:
+            break
+        for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
+            if pp.terminateAI:
+                break
+            vals, coords = _line_values(x, y, dx, dy, n=9)
+            for i, (cx, cy) in enumerate(coords):
+                if cx == x and cy == y and vals[i] == EMPTY:
+                    vals[i] = who
+                    break
+            s = _encode(vals, who)
+            if '11111' in s or _OPEN4.search(s):
+                open4.add((x, y))
+            elif _OPEN3.search(s):
+                open3.add((x, y))
+    return open4, open3
+
+def _collect_critical_blocks(who_targets):
+    crit = set()
+    for x, y in candidate_moves:
+        if pp.terminateAI:
+            break
+        for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
+            if pp.terminateAI:
+                break
+            vals, coords = _line_values(x, y, dx, dy, n=9)
+
+            for i, (cx, cy) in enumerate(coords):
+                if cx == x and cy == y and vals[i] == EMPTY:
+                    vals[i] = who_targets
+                    break
+
+            s = _encode(vals, who_targets)
+
+            if '11111' in s or _OPEN4.search(s):
+                crit.add((x, y))
+                continue
+
+            if _OPEN3.search(s):
+                crit.add((x, y))
+    return crit
+
+def _sort_pref(moves, ref=None):
+    if not moves:
+        return []
+    if ref is None:
+        ref = (pp.width // 2, pp.height // 2)
+    return sorted(moves, key=lambda mv: manhattan(mv, ref))
+
+def _cap_candidates(cands, ref=None, cap=60):
+    if len(cands) <= cap:
+        return cands
+    return _sort_pref(cands, ref)[:cap]
+
+def tactical_move():
+    if pp.terminateAI:
+        return None
+    mv = immediate_tactic(last_move=None)
+    if mv is not None or pp.terminateAI:
+        return mv
+
+    me4, me3 = _collect_by_pattern(ME)
+    if pp.terminateAI:
+        return None
+    op4, op3 = _collect_by_pattern(OPP)
+    if pp.terminateAI:
+        return None
+    ref = last_played if last_played is not None else (pp.width // 2, pp.height // 2)
+
+    for m in _sort_pref(op4, ref):
+        return m
+    for m in _sort_pref(me4, ref):
+        return m
+    for m in _sort_pref(op3, ref):
+        return m
+    for m in _sort_pref(me3, ref):
+        return m
+
+    return None
+
 def alphabeta(depth, alpha, beta, is_max, candidates, last_move):    
     if depth == 0 or pp.terminateAI:
         return evaluate_area(), None
@@ -216,7 +319,8 @@ def alphabeta(depth, alpha, beta, is_max, candidates, last_move):
     if is_max:
         best_move = None
         for (mx, my) in ordered:
-            
+            if pp.terminateAI:
+                break
             board[mx][my] = ME
             update_bounds(mx, my)
 
@@ -228,26 +332,22 @@ def alphabeta(depth, alpha, beta, is_max, candidates, last_move):
             child_cands = build_child_candidates(candidates, (mx, my))
             score, _ = alphabeta(depth-1, alpha, beta, False, child_cands, (mx, my))
 
-            
             board[mx][my] = EMPTY
             reset_bounds()
 
-            #Max
             if score > alpha:
                 alpha = score
                 best_move = (mx, my)
 
-            #Pruning
             if beta <= alpha:
                 break
-            
-
         return alpha, best_move
 
     else:
         best_move = None
         for (mx, my) in ordered:
-            
+            if pp.terminateAI:
+                break
             board[mx][my] = OPP
             update_bounds(mx, my)
            
@@ -259,20 +359,17 @@ def alphabeta(depth, alpha, beta, is_max, candidates, last_move):
             child_cands = build_child_candidates(candidates, (mx, my))
             score, _ = alphabeta(depth-1, alpha, beta, True, child_cands, (mx, my))
 
-            
             board[mx][my] = EMPTY
             reset_bounds()
 
-            #Min
             if score < beta:
                 beta = score
                 best_move = (mx, my)
 
-            #Pruning
             if beta <= alpha:
-                break      
-
+                break
         return beta, best_move
+
 def build_child_candidates(cands, played_xy):
     child = list(cands)
     if played_xy in child:
@@ -299,16 +396,51 @@ def immediate_tactic(last_move=None):
         board[x][y] = EMPTY
     return None
 
-def choose_move(depth=2, last_move=None):
-    mv = immediate_tactic(last_move)
-    if mv is not None:
-        return mv
-    cand = order_candidates(candidate_moves, last_move)
+def choose_move(depth=3, last_move=None):
+    #chooses the best move, tactic first then alpha beta
+    if not candidate_moves:
+        return (pp.width // 2, pp.height // 2)
 
-    score, mv = alphabeta(depth, -INF, INF, True, list(cand), last_move)
-    
+    mv = tactical_move()
     if mv is not None:
         return mv
+
+    if pp.terminateAI:
+        ref = last_move if last_move else (pp.width//2, pp.height//2)
+        for (x, y) in _sort_pref(candidate_moves, ref):
+            if isFree(x, y):
+                return (x, y)
+        for x in range(pp.width):
+            for y in range(pp.height):
+                if isFree(x, y):
+                    return (x, y)
+        return (0, 0)
+
+    base = order_candidates(candidate_moves, last_move)
+
+    me4, me3 = _collect_by_pattern(ME)
+    op4, op3 = _collect_by_pattern(OPP)
+    threat_first = list(dict.fromkeys(
+        _sort_pref(op4, last_move) +
+        _sort_pref(me4, last_move) +
+        _sort_pref(op3, last_move) +
+        _sort_pref(me3, last_move) +
+        base
+    ))
+
+    ref = last_move if last_move else (pp.width//2, pp.height//2)
+    threat_first = _cap_candidates(threat_first, ref, cap=60)
+
+    if pp.terminateAI:
+        for (x, y) in threat_first:
+            if isFree(x, y):
+                return (x, y)
+        return (pp.width // 2, pp.height // 2)
+
+    score, mv = alphabeta(depth, -INF, INF, True, threat_first, last_move)
+    if mv is not None:
+        return mv
+
     for x in range(pp.width):
         for y in range(pp.height):
             if board[x][y] == EMPTY:
@@ -358,8 +490,11 @@ def brain_takeback(x, y):
 def brain_turn():
     if pp.terminateAI:
         return
-    #depth 3 now
-    x, y = choose_move(depth=3, last_move=last_played)
+    if not candidate_moves:
+        init_candidate_moves()
+    pp.pipeOut(f"DEBUG candidates={len(candidate_moves)}")
+    x, y = choose_move(depth=3, last_move=last_played) 
+    pp.pipeOut(f"DEBUG move=({x},{y})")
     if not isFree(x, y):        
         placed = False
         for xx in range(pp.width):
@@ -397,33 +532,33 @@ if DEBUG_EVAL:
 DEBUG_LOGFILE = "/tmp/pbrain-pyrandom.log"
 # ...and clear it initially
 with open(DEBUG_LOGFILE,"w") as f:
-	pass
+    pass
 
 # define a function for writing messages to the file
 def logDebug(msg):
-	with open(DEBUG_LOGFILE,"a") as f:
-		f.write(msg+"\n")
-		f.flush()
+    with open(DEBUG_LOGFILE,"a") as f:
+        f.write(msg+"\n")
+        f.flush()
 
 # define a function to get exception traceback
 def logTraceBack():
-	import traceback
-	with open(DEBUG_LOGFILE,"a") as f:
-		traceback.print_exc(file=f)
-		f.flush()
-	raise
+    import traceback
+    with open(DEBUG_LOGFILE,"a") as f:
+        traceback.print_exc(file=f)
+        f.flush()
+    raise
 
 # use logDebug wherever
 # use try-except (with logTraceBack in except branch) to get exception info
 # an example of problematic function
 def brain_turn():
-	logDebug("some message 1")
-	try:
-		logDebug("some message 2")
-		1. / 0. # some code raising an exception
-		logDebug("some message 3") # not logged, as it is after error
-	except:
-		logTraceBack()
+    logDebug("some message 1")
+    try:
+        logDebug("some message 2")
+        1. / 0. # some code raising an exception
+        logDebug("some message 3") # not logged, as it is after error
+    except:
+        logTraceBack()
 """
 ######################################################################
 
@@ -438,10 +573,10 @@ pp.brain_turn = brain_turn
 pp.brain_end = brain_end
 pp.brain_about = brain_about
 if DEBUG_EVAL:
-	pp.brain_eval = brain_eval
+    pp.brain_eval = brain_eval
 
 def main():
-	pp.main()
+    pp.main()
 
 if __name__ == "__main__":
-	main()
+    main()
