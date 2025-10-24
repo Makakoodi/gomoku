@@ -396,7 +396,7 @@ def immediate_tactic(last_move=None):
         board[x][y] = EMPTY
     return None
 
-def choose_move(depth=3, last_move=None):
+def choose_move(depth=10, last_move=None):
     #chooses the best move, tactic first then alpha beta
     if not candidate_moves:
         return (pp.width // 2, pp.height // 2)
